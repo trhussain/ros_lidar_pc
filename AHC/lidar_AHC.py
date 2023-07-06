@@ -7,7 +7,6 @@ from sensor_msgs.msg import PointCloud2, PointField #the types of msg
 from sensor_msgs_py import point_cloud2 #used for reading fields 
 from visualization_msgs.msg import Marker, MarkerArray
 # from builtin_interfaces import Duration
-from geometry_msgs.msg import Point
 
 from sklearn.cluster import AgglomerativeClustering
 import numpy as np
@@ -40,10 +39,9 @@ class pcl2Subscriber(Node):
 
         self.pub_ahc_clusters = self.create_publisher(PointCloud2, 'lidar_0/AHC/clusters', 10)
         self.pub_centroid_markers = self.create_publisher(MarkerArray, 'lidar_0/AHC/centroids', 10)
-        self.pub_bounding_boxes = self.create_publisher(MarkerArray, 'lidar_0/AHC/bounding_boxes', 10)
 
         ## ros parameters
-        self.declare_parameter('AHC_framerate_goal', 15) #goal of AHC in frames per second
+        self.declare_parameter('AHC_framerate_goal', 5) #goal of AHC in frames per second
         self.declare_parameter('AHC_distance', 10) #[20, 40] works well for dense pcl with max distance<4m. [10-20] works for downsampled or sparse
         self.AHC_framerate_goal_ = self.get_parameter('AHC_framerate_goal').value
         self.AHC_period_ = round(1/self.AHC_framerate_goal_, 3)
@@ -55,7 +53,6 @@ class pcl2Subscriber(Node):
         ## initialized values
         self.downsample = 10  #initial value. This is then decided by control_framerate
         self.first = 1 #flag for getting consistent labels
-        self.color_dist = 15 #distance where colors get saturated for markers, bounding boxes
         
 
     # set and use rosparams to control framerate, etc
@@ -141,7 +138,7 @@ class pcl2Subscriber(Node):
         #filters out points if you give offsets, otherwise just formats xyz for scatterplot and AHC
     def format_pcl2(self,  min_offset=0, max_offset=0, filters=0):
         # start3 = timeit.default_timer()
-        self.get_logger().debug('start shape of xyz: %s , %s' % (np.shape(self.xyz)[0], np.shape(self.xyz)[1]))
+        # self.get_logger().debug('start shape of xyz: %s , %s' % (np.shape(self.xyz)[0], np.shape(self.xyz)[1]))
         if filters:
             filters2 = []   
             if 'x' in filters:
@@ -182,8 +179,10 @@ class pcl2Subscriber(Node):
     # for controlling framerate/processing speed
     def decimate_pcl2(self, step_size=2):
         # breakpoint()
+        # start2 = timeit.default_timer()
         self.xyz = self.xyz[::step_size]
-        self.get_logger().info('Keeping every %sth point, shape of xyz: %s, %s' % (step_size, np.shape(self.xyz)[0], np.shape(self.xyz)[1]))
+        #breakpoint()
+        #self.get_logger().info('Keeping every %sth point, shape of xyz: %s, %s' % (step_size, np.shape(self.xyz)[0], np.shape(self.xyz)[1]))
         # self.get_logger().info('decimation time %s' %(timeit.default_timer() - start2) )
         return self
 
@@ -237,7 +236,7 @@ class pcl2Subscriber(Node):
             fields.scale.x= .3 # maybe scale this with detection max/min bounds
             fields.scale.y = .1
             fields.scale.z = .1
-            fields.color.r = min(1.0,float(centroids[i,0]/self.color_dist))  #scale color with distance, hopefully
+            fields.color.r = min(1.0,float(centroids[i,0]/10))  #scale color with distance, hopefully
             fields.color.g = 0.2
             fields.color.b = 0.0
             fields.color.a = 1.0
@@ -246,7 +245,8 @@ class pcl2Subscriber(Node):
             fields.pose.position.x = centroids[i,0]
             fields.pose.position.y = centroids[i,1]
             fields.pose.position.z = centroids[i,2]
-            # fields.pose.orientation.x = TODO orientation with pca   #also y,z,w
+            # TODO orientation with PCA?
+            # fields.pose.orientation.x = TODO with pca   #also y,z,w
 
             fields.header= header
             msg.markers.append(fields)
@@ -255,17 +255,10 @@ class pcl2Subscriber(Node):
         self.pub_centroid_markers.publish(msg)
         self.get_logger().debug('length of markerArray  %s' %str(len(msg.markers)))            
 
-    def create_point(self, pt):
-        p = Point()
-        p.x = pt[0]
-        p.y = pt[1]
-        p.z = pt[2]
-        return p
-        
-
     def get_pub_bounding_boxes(self, AHC_model_labels):
         label_list = np.unique(AHC_model_labels)
-        pts = []
+        boxes = np.zeros(shape=(len(label_list), 24))  # bounding box will define edges with 24 points 
+        # vertices = []
 
         ## get one list with 0th item being [x0,y0,z0,label0]
         for i, t in enumerate(self.xyz):
@@ -276,6 +269,7 @@ class pcl2Subscriber(Node):
             fx = [i[0] for i in filtered]  # turn x,y,z points into lists of x1,x2... etc
             fy = [i[1] for i in filtered]
             fz = [i[2] for i in filtered] 
+
             minx = min(fx)
             maxx = max(fx)
             miny = min(fy)
@@ -291,38 +285,17 @@ class pcl2Subscriber(Node):
             p5 = [ maxx , miny , maxz ]
             p6 = [ maxx , maxy, maxz ]
             p7 = [ minx  , maxy, maxz ]
+            # breakpoint()
                     #one end of box,            #other end of box,          # connecting the two
-            box = [p0,p1, p1,p2, p2,p3, p3,p0, p4,p5, p5,p6, p6,p7, p7,p4, p0,p4, p1,p5, p2,p6, p3,p7, label]    
-            #pts should be x,y,z,label for each point        
-
-            [pts.append([i[0], i[1], i[2], box[-1]]) for i in box if i is not box[-1]]
-        header = Header()
-        header.stamp = self.get_clock().now().to_msg()
-        header.frame_id = "lidar_0"
-        msg = MarkerArray()
-        for label in label_list:
-            # ns=namespace for object name, id used for name, type of marker(5=line list), action 0=add or modify
-            line_list = Marker(ns="lidar_0",id = int(label), type=5, action=0)
-            line_list.scale.x= .01 
-            # line_list.color.r = 0.0 #min(1.0,float(label)/len(label_list))/2 #scale color with distance, hopefully
-            # line_list.color.g = min(1.0,float(label)/len(label_list))
-            # line_list.color.b = 0.5
-
-            line_list.color.r = float(label)/len(label_list) #scale the color for each detection
-            line_list.color.g = 0.5
-            line_list.color.b = 0.0
-            line_list.color.a = 1.0
-            line_list.lifetime = rclpy.duration.Duration(seconds=.1).to_msg()  #kill old markers after t. If a new marker with same id is published, it automatically overwrites the old one
-            line_list.header = header
-
-            # gives all points needed for one rectangle (24)
-            [line_list.points.append(self.create_point(p)) for p in pts if p[-1] == label] 
-            msg.markers.append(line_list)  #gives me markerArray so I can keep labels separate
+            box = [p0,p1,  p1,p2, p2,p3, p3,p0, p4,p5, p5,p6, p6,p7, p7,p4, p0,p4, p1,p5, p2,p6, p3,p7]
+# TODO PICKUP HERE
+            boxes[label] = box
+            # boxes.append(c)
             
-        self.pub_bounding_boxes.publish(msg)
-        #TODO check how long that takes
+
+
         
-        return self
+        return self, boxes
 
 
     ## this function isn't quite working as desired. Almost sure it has to do with how I 
@@ -423,7 +396,10 @@ class pcl2Subscriber(Node):
         # self.get_logger().info('fields.type %s' % (type(fields))) 
 
         ##get xyz data from pcl2 msg 
-        self.xyz = list(point_cloud2.read_points(pc2_msg, field_names=('x','y','z',)))
+        ##added np.array to convert list to array
+        self.xyz = tuple(map(tuple,(list(point_cloud2.read_points(pc2_msg, field_names=('x','y','z',))))))
+        self.xyz = list(self.xyz)
+        #breakpoint()
         # ii = list(point_cloud2.read_points(pc2_msg, field_names=('intensity')))  #comment to improve processing time
         # rr = list(point_cloud2.read_points(pc2_msg, field_names=('ring')))        #comment to improve processing time
         # self.get_logger().info('read points time %.7s' %(timeit.default_timer() - start) )
@@ -475,7 +451,7 @@ class pcl2Subscriber(Node):
         self.control_framerate(len(x))     
 
         self.pub_centroids(centroids1)
-        self.get_pub_bounding_boxes(model.labels_)
+        # self, bounding_boxes = self.get_pub_bounding_boxes(model.labels_)
 
     ### TODO keep consistent cluster labels from frame to frame
         # startc = timeit.default_timer()
@@ -510,7 +486,7 @@ def main(args=None):
     rclpy.init(args=args)
     AHC_node = pcl2Subscriber()
     rclpy.spin(AHC_node)
-    AHC_node.destroy_node()
+    AHC_node.destroy_node() 
     rclpy.shutdown()
 
 if __name__ == '__main__':
